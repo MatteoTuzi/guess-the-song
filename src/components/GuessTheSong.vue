@@ -32,9 +32,46 @@ const progressMs = ref(0)
 let rafId: number | null = null
 const isCelebrating = ref(false)
 const celebrateItems = ref<{ id: number, emoji: string, left: string, delayMs: number, durationMs: number, rotate: number }[]>([])
+const progressBarEl = ref<HTMLDivElement | null>(null)
+let stopTimeoutId: number | null = null
+const isScrubbing = ref(false)
+let wasPlayingBeforeScrub = false
 
-const attemptsLeft = computed(() => 5 - attemptsUsed.value)
-const currentSnippetSeconds = computed(() => snippetDurationsSeconds[Math.min(attemptsUsed.value, snippetDurationsSeconds.length - 1)])
+// Stats since page load
+const stats = ref({
+	songsStarted: 0,
+	songsSkipped: 0,
+	songsCompleted: 0,
+	totalGuesses: 0,
+	correctGuesses: 0,
+	wrongGuesses: 0,
+	totalSnippetPlays: 0,
+	totalSnippetMsPlayed: 0,
+	snippetSecondsAtCorrect: [] as number[],
+	hintsUsed: 0,
+})
+const accuracy = computed(() => {
+    const total = stats.value.totalGuesses
+    return total ? (stats.value.correctGuesses / total) : 0
+})
+const averageSnippetSecondsWhenCorrect = computed(() => {
+    const arr = stats.value.snippetSecondsAtCorrect
+    if (!arr.length) return 0
+    return arr.reduce((a, b) => a + b, 0) / arr.length
+})
+function formatMs(ms: number): string {
+    const totalSeconds = Math.floor(ms / 1000)
+    const m = Math.floor(totalSeconds / 60)
+    const s = totalSeconds % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+const attemptsLeft = computed(() => Math.max(0, 5 - (attemptsUsed.value + hintsUsed.value)))
+const hintsUsed = ref(0)
+const currentSnippetSeconds = computed(() => {
+	const idx = Math.min(attemptsUsed.value + hintsUsed.value, snippetDurationsSeconds.length - 1)
+	return snippetDurationsSeconds[idx]
+})
 const playableSongs = computed(() => songs.value.filter(s => canPlayUrl(s.url)))
 const selectOptions = computed(() => playableSongs.value.map(s => ({ value: s.title, text: `${s.title}${s.artist ? ' — ' + s.artist : ''}` })))
 
@@ -81,11 +118,13 @@ function pickRandomSong() {
 
 function resetGame() {
 	attemptsUsed.value = 0
+	hintsUsed.value = 0
 	userGuess.value = ''
 	feedback.value = ''
 	hasEnded.value = false
 	guesses.value = []
 	pickRandomSong()
+	stats.value.songsStarted += 1
 	if (tom) tom.clear(true)
 }
 
@@ -94,10 +133,48 @@ function stopAudio() {
 	if (!el) return
 	el.pause()
 	el.currentTime = 0
+	if (stopTimeoutId !== null) {
+		clearTimeout(stopTimeoutId)
+		stopTimeoutId = null
+	}
 	if (rafId !== null) {
 		cancelAnimationFrame(rafId)
 		rafId = null
 	}
+}
+
+function cancelTicking() {
+	if (rafId !== null) {
+		cancelAnimationFrame(rafId)
+		rafId = null
+	}
+}
+
+function beginSnippetPlaybackFromCurrentTime() {
+	const el = audioEl.value
+	if (!el) return
+	const msTotal = currentSnippetSeconds.value * 1000
+	const remainingMs = Math.max(0, msTotal - el.currentTime * 1000)
+	cancelTicking()
+	if (stopTimeoutId !== null) {
+		clearTimeout(stopTimeoutId)
+		stopTimeoutId = null
+	}
+	// update stats for play
+	stats.value.totalSnippetPlays += 1
+	stats.value.totalSnippetMsPlayed += remainingMs
+	const tick = () => {
+		const current = Math.min(el.currentTime * 1000, msTotal)
+		progressMs.value = current
+		if (current < msTotal && !el.paused) {
+			rafId = requestAnimationFrame(tick)
+		}
+	}
+	rafId = requestAnimationFrame(tick)
+	el.play().catch(() => {})
+	stopTimeoutId = window.setTimeout(() => {
+		el.pause()
+	}, remainingMs)
 }
 
 async function playSnippet() {
@@ -107,20 +184,7 @@ async function playSnippet() {
 	try {
 		stopAudio()
 		progressMs.value = 0
-		await el.play()
-		const ms = currentSnippetSeconds.value * 1000
-		const start = performance.now()
-		const tick = () => {
-			const current = Math.min(el.currentTime * 1000, ms)
-			progressMs.value = current
-			if (current < ms && !el.paused) {
-				rafId = requestAnimationFrame(tick)
-			}
-		}
-		rafId = requestAnimationFrame(tick)
-		setTimeout(() => {
-			el.pause()
-		}, ms)
+		beginSnippetPlaybackFromCurrentTime()
 	} catch (e) {
 		feedback.value = 'Audio playback blocked. Click play again.'
 	}
@@ -132,23 +196,36 @@ function normalize(text: string) {
 
 function submitGuess() {
 	if (!currentSong.value || hasEnded.value) return
+	if (attemptsLeft.value <= 0) {
+		feedback.value = `No attempts left. It was "${currentSong.value.title}"${currentSong.value.artist ? ' — ' + currentSong.value.artist : ''}`
+		hasEnded.value = true
+		stopAudio()
+		if (tom) tom.clear(true)
+		return
+	}
+	stats.value.totalGuesses += 1
 	const correct = normalize(userGuess.value)
 		.includes(normalize(currentSong.value.title))
 	if (correct) {
+		stats.value.correctGuesses += 1
+		stats.value.snippetSecondsAtCorrect.push(currentSnippetSeconds.value)
 		feedback.value = `Correct! ${currentSong.value.title}${currentSong.value.artist ? ' — ' + currentSong.value.artist : ''}`
 		guesses.value.push({ text: userGuess.value, correct: true, snippet: currentSnippetSeconds.value })
 		hasEnded.value = true
+		stats.value.songsCompleted += 1
 		stopAudio()
 		triggerCelebration()
 		if (tom) tom.clear(true)
 		return
 	}
+	stats.value.wrongGuesses += 1
 	guesses.value.push({ text: userGuess.value, correct: false, snippet: currentSnippetSeconds.value })
 	attemptsUsed.value += 1
 	progressMs.value = 0
-	if (attemptsUsed.value >= 5) {
+	if (attemptsUsed.value + hintsUsed.value >= 5) {
 		feedback.value = `Out of guesses. It was "${currentSong.value.title}"${currentSong.value.artist ? ' — ' + currentSong.value.artist : ''}`
 		hasEnded.value = true
+		stats.value.songsCompleted += 1
 		stopAudio()
 		if (tom) tom.clear(true)
 		return
@@ -158,6 +235,28 @@ function submitGuess() {
 	if (tom) {
 		tom.clear(true)
 	}
+}
+
+function giveHint() {
+    if (!currentSong.value || hasEnded.value) return
+    if (attemptsLeft.value <= 0) {
+        feedback.value = `No attempts left. It was "${currentSong.value?.title}"${currentSong.value?.artist ? ' — ' + currentSong.value.artist : ''}`
+        hasEnded.value = true
+        stopAudio()
+        if (tom) tom.clear(true)
+        return
+    }
+    const maxIdx = snippetDurationsSeconds.length - 1
+    const currentIdx = Math.min(attemptsUsed.value + hintsUsed.value, maxIdx)
+    if (currentIdx >= maxIdx) {
+        feedback.value = `No more hints available. Max snippet length is ${snippetDurationsSeconds[maxIdx]}s`
+        return
+    }
+    hintsUsed.value += 1
+    stats.value.hintsUsed += 1
+    stopAudio()
+    progressMs.value = 0
+    feedback.value = `Hint used. Snippet extended to ${currentSnippetSeconds.value}s`
 }
 
 function triggerCelebration() {
@@ -226,39 +325,8 @@ onUnmounted(() => {
 		tom.destroy()
 		tom = null
 	}
+	window.removeEventListener('pointermove', onProgressPointerMove)
 })
-
-async function load2020Mp3Songs() {
-	feedback.value = 'Loading 2020 tracks...'
-	try {
-		const queries = [
-			'year:2020',
-			'year:2020 hit',
-			'year:2020 top',
-			'year:2020 billboard',
-		]
-		const resultsArrays = await Promise.all(queries.map(q => searchDeezerTracksPaged(q, 4, 25, 'RANKING')))
-		const seen = new Set<string>()
-		const merged: Song[] = []
-		for (const arr of resultsArrays) {
-			for (const t of arr) {
-				if (!t.preview) continue
-				const path = getPathname(t.preview)
-				if (!path.endsWith('.mp3')) continue
-				const key = `${t.title}|${t.artist?.name}|${t.preview}`
-				if (seen.has(key)) continue
-				seen.add(key)
-				const cover = (t as any).album?.cover_medium || (t as any).album?.cover || undefined
-				merged.push({ title: t.title, artist: t.artist?.name, url: t.preview, cover })
-			}
-		}
-		songs.value = merged
-		resetGame()
-		feedback.value = `Loaded ${merged.length} tracks`
-	} catch (e) {
-		feedback.value = 'Failed to load 2020 tracks'
-	}
-}
 
 async function loadArtistMp3Songs(artistName: string, pages = 8) {
     feedback.value = `Loading ${artistName} tracks...`
@@ -330,19 +398,68 @@ function changeSong() {
 	if (currentSong.value) {
 		feedback.value = `Answer: ${currentSong.value.title}${currentSong.value.artist ? ' — ' + currentSong.value.artist : ''}`
 	}
+	// count as skip if not ended yet
+	if (!hasEnded.value && currentSong.value) {
+		stats.value.songsSkipped += 1
+	}
 	stopAudio()
 	if (tom) tom.clear(true)
 	userGuess.value = ''
 	attemptsUsed.value = 0
+	hintsUsed.value = 0
 	hasEnded.value = false
 	guesses.value = []
 	pickRandomSong()
+	stats.value.songsStarted += 1
 }
 
 watch(volume, (v) => {
 	const el = audioEl.value
 	if (el) el.volume = Math.max(0, Math.min(1, v))
 })
+
+function seekByEvent(e: PointerEvent) {
+	const bar = progressBarEl.value
+	const el = audioEl.value
+	if (!bar || !el) return
+	const rect = bar.getBoundingClientRect()
+	const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+	const frac = rect.width > 0 ? x / rect.width : 0
+	const targetSeconds = frac * currentSnippetSeconds.value
+	el.currentTime = targetSeconds
+	progressMs.value = targetSeconds * 1000
+}
+
+function onProgressPointerDown(e: PointerEvent) {
+	const el = audioEl.value
+	if (!el) return
+	isScrubbing.value = true
+	wasPlayingBeforeScrub = !el.paused
+	el.pause()
+	cancelTicking()
+	if (stopTimeoutId !== null) {
+		clearTimeout(stopTimeoutId)
+		stopTimeoutId = null
+	}
+	seekByEvent(e)
+	window.addEventListener('pointermove', onProgressPointerMove)
+	window.addEventListener('pointerup', onProgressPointerUp, { once: true })
+}
+
+function onProgressPointerMove(e: PointerEvent) {
+	if (!isScrubbing.value) return
+	seekByEvent(e)
+}
+
+function onProgressPointerUp(e: PointerEvent) {
+	if (!isScrubbing.value) return
+	isScrubbing.value = false
+	seekByEvent(e)
+	window.removeEventListener('pointermove', onProgressPointerMove)
+	if (wasPlayingBeforeScrub) {
+		beginSnippetPlaybackFromCurrentTime()
+	}
+}
 </script>
 
 <template>
@@ -384,9 +501,13 @@ watch(volume, (v) => {
 					<img :src="currentSong.cover" alt="Cover" class="w-40 h-40 object-cover rounded shadow" />
 				</div>
 
-				<!-- Second-by-second progress bar stepper -->
+				<!-- Second-by-second progress bar stepper (seekable) -->
 				<div class="flex items-center gap-2 mb-2">
-					<div class="relative w-full h-2 bg-slate-700 rounded overflow-hidden">
+					<div
+						ref="progressBarEl"
+						class="relative w-full h-2 bg-slate-700 rounded overflow-hidden cursor-pointer select-none"
+						@pointerdown="onProgressPointerDown"
+					>
 						<div class="absolute inset-y-0 left-0 bg-emerald-600/40" :style="{ width: (currentSnippetSeconds / Math.max(...snippetDurationsSeconds) * 100) + '%' }"></div>
 						<div class="absolute inset-y-0 left-0 bg-amber-400" :style="{ width: (Math.min(progressMs / (currentSnippetSeconds * 1000), 1) * 100) + '%' }"></div>
 					</div>
@@ -395,12 +516,18 @@ watch(volume, (v) => {
 
 				<div class="flex items-center gap-2 mb-3">
 					<label class="text-sm opacity-80">Guess</label>
-					<input ref="tomSelectEl" placeholder="Type song title..." />
-					<button class="ml-auto px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50" @click="submitGuess" :disabled="hasEnded">Submit</button>
-					<button class="ml-auto px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50" @click="playSnippet" :disabled="hasEnded">
-						Play snippet
+					<input ref="tomSelectEl" class="flex-1 min-w-0 w-full" placeholder="Type song title..." />
+				</div>
+				<div class="flex flex-wrap items-center gap-2 mb-3">
+					<button class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 flex items-center gap-2" @click="submitGuess" :disabled="hasEnded">
+						<span>Submit</span>
+						<span class="rounded-full bg-slate-900/60 border border-slate-600 px-2 py-0.5 text-xs">{{ attemptsUsed }}</span>
 					</button>
-					<button class="px-4 py-2 rounded bg-slate-700 hover:bg-slate-600" v-if="hasEnded" @click="resetGame">New song</button>
+					<button class="px-4 py-2 rounded bg-purple-600 hover:bg-purple-500 disabled:opacity-50 flex items-center gap-2" @click="giveHint" :disabled="hasEnded">
+						<span>Hint</span>
+						<span class="rounded-full bg-slate-900/60 border border-slate-600 px-2 py-0.5 text-xs">{{ hintsUsed }}</span>
+					</button>
+					<button class="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50" @click="playSnippet" :disabled="hasEnded">Play snippet</button>
 					<button class="px-4 py-2 rounded bg-amber-600 hover:bg-amber-500" @click="changeSong">Change song</button>
 				</div>
 
@@ -435,6 +562,65 @@ watch(volume, (v) => {
 								</tr>
 								<tr v-if="!guesses.length">
 									<td colspan="4" class="px-3 py-4 text-center opacity-60">No guesses yet</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+
+				<!-- Stats since page load -->
+				<div class="mt-6">
+					<div class="text-sm font-semibold mb-2">Session statistics</div>
+					<div class="overflow-hidden rounded border border-slate-700">
+						<table class="w-full text-sm">
+							<tbody>
+								<tr class="bg-slate-700/30">
+									<td class="px-3 py-2">Submit count</td>
+									<td class="px-3 py-2 text-right font-semibold">{{ stats.totalGuesses }}</td>
+								</tr>
+								<tr class="bg-slate-700/30">
+									<td class="px-3 py-2">Hints used</td>
+									<td class="px-3 py-2 text-right font-semibold">{{ stats.hintsUsed }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Songs started</td>
+									<td class="px-3 py-2 text-right">{{ stats.songsStarted }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Songs skipped</td>
+									<td class="px-3 py-2 text-right">{{ stats.songsSkipped }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Songs completed</td>
+									<td class="px-3 py-2 text-right">{{ stats.songsCompleted }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Total guesses</td>
+									<td class="px-3 py-2 text-right">{{ stats.totalGuesses }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Correct guesses</td>
+									<td class="px-3 py-2 text-right">{{ stats.correctGuesses }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Wrong guesses</td>
+									<td class="px-3 py-2 text-right">{{ stats.wrongGuesses }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Accuracy</td>
+									<td class="px-3 py-2 text-right">{{ (accuracy * 100).toFixed(0) }}%</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Snippet plays</td>
+									<td class="px-3 py-2 text-right">{{ stats.totalSnippetPlays }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Time played</td>
+									<td class="px-3 py-2 text-right">{{ formatMs(stats.totalSnippetMsPlayed) }}</td>
+								</tr>
+								<tr>
+									<td class="px-3 py-2 opacity-80">Avg seconds when correct</td>
+									<td class="px-3 py-2 text-right">{{ averageSnippetSecondsWhenCorrect.toFixed(1) }}s</td>
 								</tr>
 							</tbody>
 						</table>
