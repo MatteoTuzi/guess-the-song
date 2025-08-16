@@ -34,6 +34,7 @@ export const useGameStore = defineStore('game', {
 		progressMs: 0,
 		isCelebrating: false,
 		celebrateItems: [] as CelebrateItem[],
+		didWin: false,
 		// DOM references managed via store for simplicity of integration
 		audioEl: null as HTMLAudioElement | null,
 		// stats
@@ -136,6 +137,7 @@ export const useGameStore = defineStore('game', {
 			this.userGuess = ''
 			this.feedback = ''
 			this.hasEnded = false
+			this.didWin = false
 			this.guesses = []
 			this.progressMs = 0
 			this.pickRandomSong()
@@ -213,6 +215,7 @@ export const useGameStore = defineStore('game', {
 			if (this.attemptsLeft <= 0) {
 				this.feedback = `No attempts left. It was "${this.currentSong.title}"${this.currentSong.artist ? ' — ' + this.currentSong.artist : ''}`
 				this.hasEnded = true
+				this.didWin = false
 				this.stopAudio()
 				return
 			}
@@ -224,6 +227,7 @@ export const useGameStore = defineStore('game', {
 				this.feedback = `Correct! ${this.currentSong.title}${this.currentSong.artist ? ' — ' + this.currentSong.artist : ''}`
 				this.guesses.push({ text: this.userGuess, correct: true, snippet: this.currentSnippetSeconds })
 				this.hasEnded = true
+				this.didWin = true
 				this.stats.songsCompleted += 1
 				this._saveStats()
 				this.stopAudio()
@@ -237,6 +241,7 @@ export const useGameStore = defineStore('game', {
 			if (this.attemptsUsed + this.hintsUsed >= 5) {
 				this.feedback = `Out of guesses. It was "${this.currentSong.title}"${this.currentSong.artist ? ' — ' + this.currentSong.artist : ''}`
 				this.hasEnded = true
+				this.didWin = false
 				this.stats.songsCompleted += 1
 				this._saveStats()
 				this.stopAudio()
@@ -300,6 +305,7 @@ export const useGameStore = defineStore('game', {
 			this.attemptsUsed = 0
 			this.hintsUsed = 0
 			this.hasEnded = false
+			this.didWin = false
 			this.guesses = []
 			this.progressMs = 0
 			this.pickRandomSong()
