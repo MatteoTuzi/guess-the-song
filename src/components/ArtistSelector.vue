@@ -38,7 +38,7 @@ onMounted(() => {
 			const val = store.selectedArtist
 			if (val) {
 				;(this as any).addOption({ value: val, text: val })
-				this.setValue(val, true)
+				;(this as any).setValue(val, true)
 				emit('artist-changed', val)
 			}
 		},
@@ -46,7 +46,7 @@ onMounted(() => {
 			store.setSelectedArtist(val || '')
 			emit('artist-changed', val || '')
 		},
-		onType: (str: string) => {
+		onType: (_str: string) => {
 			// allow free typing but only trigger load when confirm/enter or selection change
 		},
 	})
@@ -58,7 +58,7 @@ onMounted(() => {
 			if (!tom) return
 			if (val) {
 				tom.addOption({ value: val, text: val })
-				tom.setValue(val, true)
+				;(tom as any).setValue(val, true)
 			} else {
 				tom.clear(true)
 			}
